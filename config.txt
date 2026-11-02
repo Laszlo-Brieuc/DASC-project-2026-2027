@@ -1,0 +1,5 @@
+# Configuration File V1.0
+#Hope this works
+
+#THe macro for the port, i believe.
+PORT_ENCODING = 50000

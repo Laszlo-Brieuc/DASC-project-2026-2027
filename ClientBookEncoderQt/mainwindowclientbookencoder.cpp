@@ -6,6 +6,11 @@
 #include <iostream>
 using namespace std;
 
+#include "tcp.h"
+
+// Global socket descriptor for client connection
+static int sClient = -1;
+
 MainWindowClientBookEncoder::MainWindowClientBookEncoder(QWidget *parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindowClientBookEncoder)
@@ -13,9 +18,7 @@ MainWindowClientBookEncoder::MainWindowClientBookEncoder(QWidget *parent)
     ui->setupUi(this);
     ::close(2);
 
-    //this->setFixedSize(1068, 301);
-
-    // Configuration de la table des employes (Personnel Garage)
+    // Configuration de la table des livres encodés
     ui->tableWidgetEncodedBooks->setColumnCount(9);
     ui->tableWidgetEncodedBooks->setRowCount(0);
     QStringList labelsTableEmployes;
@@ -31,19 +34,18 @@ MainWindowClientBookEncoder::MainWindowClientBookEncoder(QWidget *parent)
 
     this->logoutOk();
 
-    // Exemples d'utilisation (à supprimer)
-    this->addTupleTableBooks(1,"Les Thanatonautes","Bernard Werber","Science-Fiction","978-2253139225",505,1999,9.7f,3);
-    this->addTupleTableBooks(6,"Dune","Frank Herbert","Science-Fiction","978-2266320481",929,2021,11.95f,13);
-    this->addTupleTableBooks(13,"Le silence des agneaux","Thomas Harris","Thriller","978-2266208949",377,2015,7.7f,17);
-
-    this->addComboBoxAuthors("Bernard Werber");
-    this->addComboBoxAuthors("Dan Brown");
-
-    this->addComboBoxSubjects("Roman");
-    this->addComboBoxSubjects("Science-fiction");
+    // Clear hardcoded examples
+    this->clearTableBooks();
+    this->clearComboBoxAuthors();
+    this->clearComboBoxSubjects();
 }
 
 MainWindowClientBookEncoder::~MainWindowClientBookEncoder() {
+    if (sClient != -1) {
+        Send(sClient, (char*)"LOGOUT", strlen("LOGOUT"));
+        ::close(sClient);
+        sClient = -1;
+    }
     delete ui;
 }
 
@@ -229,30 +231,221 @@ int MainWindowClientBookEncoder::dialogInputInt(const string& title,const string
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///// Fonctions gestion des boutons et items de menu (TO DO) /////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////
+void MainWindowClientBookEncoder::on_actionLogin_triggered() {
+    string login = this->dialogInputText("Entrée en session","Login ?");
+    string password = this->dialogInputText("Entrée en session","Password ?");
+
+    if (login.empty() || password.empty()) return;
+
+    // Connect socket if not already connected
+    if (sClient == -1) {
+        sClient = ClientSocket((char*)"127.0.0.1", 5000);
+        if (sClient == -1) {
+            this->dialogError("Erreur Connexion", "Impossible de se connecter au serveur Encodage !");
+            return;
+        }
+    }
+
+    // Prepare and send LOGIN request
+    char request[512];
+    snprintf(request, sizeof(request), "LOGIN#%s#%s", login.c_str(), password.c_str());
+    Send(sClient, request, strlen(request));
+
+    // Read response
+    char response[2048];
+    int bytes = Receive(sClient, response);
+    if (bytes <= 0) {
+        this->dialogError("Erreur Réseau", "Le serveur ne répond pas.");
+        ::close(sClient);
+        sClient = -1;
+        return;
+    }
+
+    // Parse response
+    char *token = strtok(response, "#");
+    if (token && strcmp(token, "LOGIN") == 0) {
+        char *status = strtok(NULL, "#");
+        if (status && strcmp(status, "ok") == 0) {
+            this->loginOk();
+            this->dialogMessage("Succès", "Connexion réussie !");
+
+            // Automatically load Authors and Subjects
+            this->clearComboBoxAuthors();
+            this->clearComboBoxSubjects();
+
+            // 1. GET_AUTHORS Parsing Loop
+            Send(sClient, (char*)"GET_AUTHORS", strlen("GET_AUTHORS"));
+            char authResp[2048];
+            if (Receive(sClient, authResp) > 0) {
+                char *ptr = strtok(authResp, "#");
+                if (ptr && strcmp(ptr, "GET_AUTHORS") == 0) {
+                    ptr = strtok(NULL, "#"); // Skip "ok"
+                    while ((ptr = strtok(NULL, "#")) != NULL) {
+                        int id = 0;
+                        char lName[100] = {0}, fName[100] = {0};
+                        // Expecting: id;last_name;first_name
+                        if (sscanf(ptr, "%d;%99[^;];%99s", &id, lName, fName) >= 2) {
+                            string fullName = string(lName) + " " + string(fName);
+                            ui->comboBoxAuthors->addItem(QString::fromStdString(fullName), QVariant(id));
+                        }
+                    }
+                }
+            }
+
+            // 2. GET_SUBJECTS Parsing Loop
+            Send(sClient, (char*)"GET_SUBJECTS", strlen("GET_SUBJECTS"));
+            char subjResp[2048];
+            if (Receive(sClient, subjResp) > 0) {
+                char *ptr = strtok(subjResp, "#");
+                if (ptr && strcmp(ptr, "GET_SUBJECTS") == 0) {
+                    ptr = strtok(NULL, "#"); // Skip "ok"
+                    while ((ptr = strtok(NULL, "#")) != NULL) {
+                        int id = 0;
+                        char sName[100] = {0};
+                        // Expecting: id;name
+                        if (sscanf(ptr, "%d;%99[^\r\n#]", &id, sName) == 2) {
+                            ui->comboBoxSubjects->addItem(QString::fromStdString(sName), QVariant(id));
+                        }
+                    }
+                }
+            }
+
+        } else {
+            char *msg = strtok(NULL, "#");
+            this->dialogError("Erreur Connexion", msg ? msg : "Identifiants incorrects !");
+        }
+    }
+}
+
+void MainWindowClientBookEncoder::on_actionLogout_triggered() {
+    if (sClient != -1) {
+        Send(sClient, (char*)"LOGOUT", strlen("LOGOUT"));
+        char response[256];
+        Receive(sClient, response);
+        ::close(sClient);
+        sClient = -1;
+    }
+    this->clearComboBoxAuthors();
+    this->clearComboBoxSubjects();
+    this->clearTableBooks();
+    this->logoutOk();
+    this->dialogMessage("Déconnexion", "Session fermée.");
+}
+
 void MainWindowClientBookEncoder::on_pushButtonAddAuthor_clicked() {
-    string lastName = this->dialogInputText("Nouvel auteur","Nom ?");
-    string firstName = this->dialogInputText("Nouvel auteur","Prénom ?");
-    string birthDate = this->dialogInputText("Nouvel auteur","Date de naissance (yyyy-mm-dd) ?");
-    cout << "Nom : " << lastName << endl;
-    cout << "Prénom : " << firstName << endl;
-    cout << "Date de naissance : " << birthDate << endl;
+    string lastName = this->dialogInputText("Nouvel auteur", "Nom ?");
+    string firstName = this->dialogInputText("Nouvel auteur", "Prénom ?");
+
+    if (lastName.empty() || firstName.empty()) return;
+
+    char request[512];
+    snprintf(request, sizeof(request), "ADD_AUTHOR#%s#%s", lastName.c_str(), firstName.c_str());
+    Send(sClient, request, strlen(request));
+
+    char response[512];
+    if (Receive(sClient, response) > 0) {
+        char *ptr = strtok(response, "#");
+        if (ptr && strcmp(ptr, "ADD_AUTHOR") == 0) {
+            char *status = strtok(NULL, "#");
+            char *val = strtok(NULL, "#");
+            if (status && strcmp(status, "ok") == 0 && val) {
+                int newId = atoi(val);
+                if (newId != -1) {
+                    string fullName = lastName + " " + firstName;
+                    ui->comboBoxAuthors->addItem(QString::fromStdString(fullName), QVariant(newId));
+                    this->dialogMessage("Succès", "Auteur ajouté avec succès !");
+                } else {
+                    this->dialogError("Erreur", "Auteur déjà existant dans la base de données !");
+                }
+            }
+        }
+    }
 }
 
 void MainWindowClientBookEncoder::on_pushButtonAddSubject_clicked() {
-    string name = this->dialogInputText("Nouveau sujet","Nom ?");
-    cout << "Nom : " << name << endl;
+    string name = this->dialogInputText("Nouveau sujet", "Nom ?");
+    if (name.empty()) return;
+
+    char request[512];
+    snprintf(request, sizeof(request), "ADD_SUBJECT#%s", name.c_str());
+    Send(sClient, request, strlen(request));
+
+    char response[512];
+    if (Receive(sClient, response) > 0) {
+        char *ptr = strtok(response, "#");
+        if (ptr && strcmp(ptr, "ADD_SUBJECT") == 0) {
+            char *status = strtok(NULL, "#");
+            char *val = strtok(NULL, "#");
+            if (status && strcmp(status, "ok") == 0 && val) {
+                int newId = atoi(val);
+                if (newId != -1) {
+                    ui->comboBoxSubjects->addItem(QString::fromStdString(name), QVariant(newId));
+                    this->dialogMessage("Succès", "Sujet ajouté avec succès !");
+                } else {
+                    this->dialogError("Erreur", "Sujet déjà existant dans la base de données !");
+                }
+            }
+        }
+    }
 }
 
 void MainWindowClientBookEncoder::on_pushButtonAddBook_clicked() {
-    cout << "title = " << this->getTitle() << endl;
-    cout << "Isbn = " << this->getIsbn() << endl;
-    cout << "PageCount = " << this->getPageCount() << endl;
-    cout << "Price = " << this->getPrice() << endl;
-    cout << "PublishYear = " << this->getPublishYear() << endl;
-    cout << "Stock = " << this->getStockQuantity() << endl;
+    string title = this->getTitle();
+    string isbn = this->getIsbn();
+    int pageCount = this->getPageCount();
+    float price = this->getPrice();
+    int publishYear = this->getPublishYear();
+    int stock = this->getStockQuantity();
 
-    cout << "selection auteur = " << this->getSelectionAuthor() << endl;
-    cout << "selection sujet  = " << this->getSelectionSubject() << endl;
+    if (title.empty() || isbn.empty()) {
+        this->dialogError("Erreur Champs", "Veuillez remplir le titre et l'ISBN.");
+        return;
+    }
+
+    int authorId = ui->comboBoxAuthors->currentData().toInt();
+    int subjectId = ui->comboBoxSubjects->currentData().toInt();
+
+    if (authorId <= 0 || subjectId <= 0) {
+        this->dialogError("Erreur Sélection", "Veuillez sélectionner un auteur et un sujet valides.");
+        return;
+    }
+
+    // --- FIX FOR LOCALE COMMA ISSUE (2,50 -> 2.50) ---
+    char priceStr[32];
+    snprintf(priceStr, sizeof(priceStr), "%.2f", price);
+    for (int i = 0; priceStr[i] != '\0'; i++) {
+        if (priceStr[i] == ',') priceStr[i] = '.';
+    }
+    // ------------------------------------------------
+
+    char request[1024];
+    snprintf(request, sizeof(request), 
+             "ADD_BOOK#%d#%d#%s#%s#%d#%d#%s#%d", 
+             authorId, subjectId, title.c_str(), isbn.c_str(), 
+             pageCount, stock, priceStr, publishYear);
+
+    Send(sClient, request, strlen(request));
+
+    char response[512];
+    if (Receive(sClient, response) > 0) {
+        char *ptr = strtok(response, "#");
+        if (ptr && strcmp(ptr, "ADD_BOOK") == 0) {
+            char *status = strtok(NULL, "#");
+            char *val = strtok(NULL, "#");
+            if (status && strcmp(status, "ok") == 0 && val) {
+                int newBookId = atoi(val);
+                if (newBookId != -1) {
+                    this->addTupleTableBooks(newBookId, title, 
+                                             this->getSelectionAuthor(), 
+                                             this->getSelectionSubject(), 
+                                             isbn, pageCount, publishYear, price, stock);
+                    this->dialogMessage("Succès", "Livre ajouté à la base de données !");
+                } else {
+                    this->dialogError("Erreur", "Impossible d'ajouter le livre en base de données.");
+                }
+            }
+        }
+    }
 }
 
 void MainWindowClientBookEncoder::on_pushButtonClear_clicked() {
@@ -264,16 +457,11 @@ void MainWindowClientBookEncoder::on_pushButtonClear_clicked() {
     ui->spinBoxStockQuantity->setValue(0);
 }
 
-void MainWindowClientBookEncoder::on_actionLogin_triggered() {
-    string login = this->dialogInputText("Entrée en session","Login ?");
-    string password = this->dialogInputText("Entrée en session","Password ?");
-    this->loginOk();
-}
-
-void MainWindowClientBookEncoder::on_actionLogout_triggered() {
-    this->logoutOk();
-}
-
 void MainWindowClientBookEncoder::on_actionQuitter_triggered(){
+    if (sClient != -1) {
+        Send(sClient, (char*)"LOGOUT", strlen("LOGOUT"));
+        ::close(sClient);
+        sClient = -1;
+    }
     QApplication::exit(0);
 }
