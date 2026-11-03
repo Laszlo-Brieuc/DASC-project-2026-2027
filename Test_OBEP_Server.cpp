@@ -8,8 +8,13 @@
 #include "tcp.h"
 #include "OBEP.h"
 #include "configuration_loader.h"
+#include "MyOwnSql.h"
 
 #define MAX_QUEUE 50
+
+// the counter to tell when threads are busy, useful for warning.
+int active_workers = 0;
+pthread_mutex_t worker_count_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Thread Pool Task Queue
 int connection_queue[MAX_QUEUE];
@@ -61,6 +66,24 @@ void* worker_thread(void* arg) {
         int sService = pop_socket();
         printf("[THREAD %p] Picked up client connection on socket %d\n", (void*)pthread_self(), sService);
 
+        // Check if all worker threads are currently active
+        pthread_mutex_lock(&worker_count_mutex);
+        bool is_server_busy = (active_workers >= config.pool_size);
+        pthread_mutex_unlock(&worker_count_mutex);
+
+        // If saturated, politely reject the client instead of blocking them silently
+        if (is_server_busy) {
+            char *busy_msg = (char*)"LOGIN#ko#Serveur saturé, veuillez réessayer plus tard !";
+            Send(sService, busy_msg, strlen(busy_msg));
+            close(sService);
+            continue; // Skip processing and go back to popping the next socket
+        }
+
+        // Mark this worker as busy
+        pthread_mutex_lock(&worker_count_mutex);
+        active_workers++;
+        pthread_mutex_unlock(&worker_count_mutex);
+
         char request[2048];
         char response[2048];
         bool keepAlive = true;
@@ -82,6 +105,11 @@ void* worker_thread(void* arg) {
             Send(sService, response, strlen(response));
             printf("[THREAD %p] Response sent: %s\n", (void*)pthread_self(), response);
         }
+
+        // Mark this worker as free again
+        pthread_mutex_lock(&worker_count_mutex);
+        active_workers--;
+        pthread_mutex_unlock(&worker_count_mutex);
 
         // Clean up socket upon logout or client disconnect
         retire(sService);

@@ -284,7 +284,8 @@ void MainWindowClientBookEncoder::on_actionLogin_triggered() {
                         int id = 0;
                         char lName[100] = {0}, fName[100] = {0};
                         // Expecting: id;last_name;first_name
-                        if (sscanf(ptr, "%d;%99[^;];%99s", &id, lName, fName) >= 2) {
+                        // Correction to ensure spaced names or names with - don't break it.
+                        if (sscanf(ptr, "%d;%99[^;];%99[^\r\n]", &id, lName, fName) >= 2) {
                             string fullName = string(lName) + " " + string(fName);
                             ui->comboBoxAuthors->addItem(QString::fromStdString(fullName), QVariant(id));
                         }
